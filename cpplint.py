@@ -840,10 +840,13 @@ class _CppLintState(object):
 
   def PrintErrorCounts(self):
     """Print a summary of errors by category, and the total."""
+    # SRombauts: added a "cpplint:" prefix
     for category, count in self.errors_by_category.iteritems():
-      sys.stderr.write('Category \'%s\' errors found: %d\n' %
+      sys.stderr.write('cpplint: Category \'%s\' errors found: %d\n' %
                        (category, count))
-    sys.stderr.write('Total errors found: %d\n' % self.error_count)
+    # SRombauts: "cpplint:" prefix and error message only when at least one error
+    if 0 < self.error_count:
+      sys.stderr.write('cpplint: Total errors found: %d\n' % self.error_count)
 
 _cpplint_state = _CppLintState()
 
@@ -1117,8 +1120,16 @@ def Error(filename, linenum, category, confidence, message):
       sys.stderr.write('%s(%s):  %s  [%s] [%d]\n' % (
           filename, linenum, message, category, confidence))
     elif _cpplint_state.output_format == 'eclipse':
-      sys.stderr.write('%s:%s: warning: %s  [%s] [%d]\n' % (
-          filename, linenum, message, category, confidence))
+      # SRombauts: confident 5==error/4==warning/3,2,1==note
+      if confidence == 5:
+        sys.stderr.write('%s:%s: error: %s  [%s] [%d]\n' % (
+            filename, linenum, message, category, confidence))
+      elif confidence == 4:
+        sys.stderr.write('%s:%s: warning: %s  [%s] [%d]\n' % (
+            filename, linenum, message, category, confidence))
+      else:
+        sys.stderr.write('%s:%s: note: %s  [%s] [%d]\n' % (
+            filename, linenum, message, category, confidence))
     else:
       sys.stderr.write('%s:%s:  %s  [%s] [%d]\n' % (
           filename, linenum, message, category, confidence))
@@ -1648,6 +1659,30 @@ def GetIndentLevel(line):
     return 0
 
 
+# SRombauts: added a rule for Doxygen file headers
+def CheckForFilename(filename, lines, error):
+  """Logs an error if the Filename does not appear at the top of the file."""
+
+  basename = os.path.basename(filename)
+
+  # We'll say it should occur by line 10.
+  for linenum in xrange(1, min(len(lines), 11)):
+    if Search(r'NOLINT\(begin\)', lines[linenum]):
+      return
+    match_file = Match(r'^.*@file\s+(.*)$', lines[linenum])
+    if match_file:
+      filename_found = match_file.group(1)
+      if filename_found.endswith(basename):
+        break
+      else: 
+        error(filename, linenum, 'readability/filename', 5,
+              'Doxygen header "@file %s" does not match "%s" real file name.' % (filename_found, basename) )
+        break
+  else: # means no @file tag was found
+    error(filename, 0, 'doxygen/filename', 5,
+          'Doxygen header "@file %s" not found.' % basename)
+
+
 def GetHeaderGuardCPPVariable(filename):
   """Returns the CPP variable that should be used as a header guard.
 
@@ -1697,79 +1732,91 @@ def CheckForHeaderGuard(filename, clean_lines, error):
     if Search(r'//\s*NOLINT\(build/header_guard\)', i):
       return
 
-  cppvar = GetHeaderGuardCPPVariable(filename)
+# SRombauts: search instead for "#pragma once"
+#  cppvar = GetHeaderGuardCPPVariable(filename)
+#
+#  ifndef = None
+#  ifndef_linenum = 0
+#  define = None
+#  endif = None
+#  endif_linenum = 0
 
-  ifndef = ''
-  ifndef_linenum = 0
-  define = ''
-  endif = ''
-  endif_linenum = 0
+  pragma_once = None
   for linenum, line in enumerate(raw_lines):
     linesplit = line.split()
     if len(linesplit) >= 2:
-      # find the first occurrence of #ifndef and #define, save arg
-      if not ifndef and linesplit[0] == '#ifndef':
-        # set ifndef to the header guard presented on the #ifndef line.
-        ifndef = linesplit[1]
-        ifndef_linenum = linenum
-      if not define and linesplit[0] == '#define':
-        define = linesplit[1]
-    # find the last occurrence of #endif, save entire line
-    if line.startswith('#endif'):
-      endif = line
-      endif_linenum = linenum
+      # SRombauts: search instead for "#pragma once"
+      if linesplit[0] == '#pragma' and linesplit[1] == 'once':
+        pragma_once = True
+#      # find the first occurrence of #ifndef and #define, save arg
+#      if not ifndef and linesplit[0] == '#ifndef':
+#        # set ifndef to the header guard presented on the #ifndef line.
+#        ifndef = linesplit[1]
+#        ifndef_linenum = linenum
+#      if not define and linesplit[0] == '#define':
+#        define = linesplit[1]
+#    # find the last occurrence of #endif, save entire line
+#    if line.startswith('#endif'):
+#      endif = line
+#      endif_linenum = linenum
 
-  if not ifndef or not define or ifndef != define:
-    error(filename, 0, 'build/header_guard', 5,
-          'No #ifndef header guard found, suggested CPP variable is: %s' %
-          cppvar)
+  # SRombauts: search instead for "#pragma once"
+  if not pragma_once:
+    error(filename, 1, 'build/header_guard', 4,
+          'No #pragma once header guard found')
     return
-
-  # The guard should be PATH_FILE_H_, but we also allow PATH_FILE_H__
-  # for backward compatibility.
-  if ifndef != cppvar:
-    error_level = 0
-    if ifndef != cppvar + '_':
-      error_level = 5
-
-    ParseNolintSuppressions(filename, raw_lines[ifndef_linenum], ifndef_linenum,
-                            error)
-    error(filename, ifndef_linenum, 'build/header_guard', error_level,
-          '#ifndef header guard has wrong style, please use: %s' % cppvar)
-
-  # Check for "//" comments on endif line.
-  ParseNolintSuppressions(filename, raw_lines[endif_linenum], endif_linenum,
-                          error)
-  match = Match(r'#endif\s*//\s*' + cppvar + r'(_)?\b', endif)
-  if match:
-    if match.group(1) == '_':
-      # Issue low severity warning for deprecated double trailing underscore
-      error(filename, endif_linenum, 'build/header_guard', 0,
-            '#endif line should be "#endif  // %s"' % cppvar)
-    return
-
-  # Didn't find the corresponding "//" comment.  If this file does not
-  # contain any "//" comments at all, it could be that the compiler
-  # only wants "/**/" comments, look for those instead.
-  no_single_line_comments = True
-  for i in xrange(1, len(raw_lines) - 1):
-    line = raw_lines[i]
-    if Match(r'^(?:(?:\'(?:\.|[^\'])*\')|(?:"(?:\.|[^"])*")|[^\'"])*//', line):
-      no_single_line_comments = False
-      break
-
-  if no_single_line_comments:
-    match = Match(r'#endif\s*/\*\s*' + cppvar + r'(_)?\s*\*/', endif)
-    if match:
-      if match.group(1) == '_':
-        # Low severity warning for double trailing underscore
-        error(filename, endif_linenum, 'build/header_guard', 0,
-              '#endif line should be "#endif  /* %s */"' % cppvar)
-      return
-
-  # Didn't find anything
-  error(filename, endif_linenum, 'build/header_guard', 5,
-        '#endif line should be "#endif  // %s"' % cppvar)
+#  if not ifndef or not define or ifndef != define:
+#    # SRombauts: rule deactivated => check #pragma once instead 
+#    error(filename, 0, 'build/header_guard', 0,
+#          'No #ifndef header guard found, suggested CPP variable is: %s' %
+#          cppvar)
+#    return
+#
+#  # The guard should be PATH_FILE_H_, but we also allow PATH_FILE_H__
+#  # for backward compatibility.
+#  if ifndef != cppvar:
+#    error_level = 0
+#    if ifndef != cppvar + '_':
+#      error_level = 5
+#
+#    ParseNolintSuppressions(filename, raw_lines[ifndef_linenum], ifndef_linenum,
+#                            error)
+#    error(filename, ifndef_linenum, 'build/header_guard', error_level,
+#          '#ifndef header guard has wrong style, please use: %s' % cppvar)
+#
+#  # Check for "//" comments on endif line.
+#  ParseNolintSuppressions(filename, raw_lines[endif_linenum], endif_linenum,
+#                          error)
+#  match = Match(r'#endif\s*//\s*' + cppvar + r'(_)?\b', endif)
+#  if match:
+#    if match.group(1) == '_':
+#      # Issue low severity warning for deprecated double trailing underscore
+#      error(filename, endif_linenum, 'build/header_guard', 0,
+#            '#endif line should be "#endif  // %s"' % cppvar)
+#    return
+#
+#  # Didn't find the corresponding "//" comment.  If this file does not
+#  # contain any "//" comments at all, it could be that the compiler
+#  # only wants "/**/" comments, look for those instead.
+#  no_single_line_comments = True
+#  for i in xrange(1, len(raw_lines) - 1):
+#    line = raw_lines[i]
+#    if Match(r'^(?:(?:\'(?:\.|[^\'])*\')|(?:"(?:\.|[^"])*")|[^\'"])*//', line):
+#      no_single_line_comments = False
+#      break
+#
+#  if no_single_line_comments:
+#    match = Match(r'#endif\s*/\*\s*' + cppvar + r'(_)?\s*\*/', endif)
+#    if match:
+#      if match.group(1) == '_':
+#        # Low severity warning for double trailing underscore
+#        error(filename, endif_linenum, 'build/header_guard', 0,
+#              '#endif line should be "#endif  /* %s */"' % cppvar)
+#      return
+#
+#  # Didn't find anything
+#  error(filename, endif_linenum, 'build/header_guard', 5,
+#        '#endif line should be "#endif  // %s"' % cppvar)
 
 
 def CheckHeaderFileIncluded(filename, include_state, error):
@@ -2484,8 +2531,9 @@ class NestingState(object):
         # Check that access keywords are indented +1 space.  Skip this
         # check if the keywords are not preceded by whitespaces.
         indent = access_match.group(1)
+        # SRombauts: the above exception was no working '^\s*$' => '^\s+$'
         if (len(indent) != classinfo.class_indent + 1 and
-            Match(r'^\s*$', indent)):
+            Match(r'^\s+$', indent)):
           if classinfo.is_struct:
             parent = 'struct ' + classinfo.name
           else:
@@ -2620,9 +2668,10 @@ def CheckForNonStandardConstructs(filename, clean_lines, linenum,
   # For the rest, work with both comments and strings removed.
   line = clean_lines.elided[linenum]
 
+  # SRombauts: switched to standard types from <cstdin> (int8 -> int8_t)
   if Search(r'\b(const|volatile|void|char|short|int|long'
             r'|float|double|signed|unsigned'
-            r'|schar|u?int8|u?int16|u?int32|u?int64)'
+            r'|schar|u?int8_t|u?int16_t|u?int32_t|u?int64_t)'
             r'\s+(register|static|extern|typedef)\b',
             line):
     error(filename, linenum, 'build/storage_class', 5,
@@ -2926,14 +2975,12 @@ def CheckComment(line, filename, linenum, next_line_start, error):
     # Comparisons made explicit for clarity -- pylint: disable=g-explicit-bool-comparison
     if (line.count('"', 0, commentpos) -
         line.count('\\"', 0, commentpos)) % 2 == 0:   # not in quotes
-      # Allow one space for new scopes, two spaces otherwise:
-      if (not (Match(r'^.*{ *//', line) and next_line_start == commentpos) and
-          ((commentpos >= 1 and
-            line[commentpos-1] not in string.whitespace) or
-           (commentpos >= 2 and
-            line[commentpos-2] not in string.whitespace))):
-        error(filename, linenum, 'whitespace/comments', 2,
-              'At least two spaces is best between code and comments')
+      # SRombauts: one space is enough
+      if (not Match(r'^\s*{ //', line) and
+          (commentpos >= 1 and
+           line[commentpos-1] not in string.whitespace)):
+        error(filename, linenum, 'whitespace/comments', 3,
+              'At least one space is best between code and comments')
 
       # Checks for common mistakes in TODO comments.
       comment = line[commentpos:]
@@ -3886,7 +3933,7 @@ def GetPreviousNonBlankLine(clean_lines, linenum):
     prevlinenum -= 1
   return ('', -1)
 
-
+# TODO(SRombauts) detects if/else/for/while without an opening brace on the same line
 def CheckBraces(filename, clean_lines, linenum, error):
   """Looks for misplaced braces (e.g. at the end of line).
 
@@ -4395,8 +4442,9 @@ def CheckStyle(filename, clean_lines, linenum, file_extension, nesting_state,
   line = raw_lines[linenum]
 
   if line.find('\t') != -1:
-    error(filename, linenum, 'whitespace/tab', 1,
-          'Tab found; better to use spaces')
+    # SRombauts: never allow tabs
+    error(filename, linenum, 'whitespace/tab', 5,
+          'Tab found; use spaces indents only')
 
   # One or three blank spaces at the beginning of the line is weird; it's
   # hard to reconcile that with 2-space indents.
@@ -4421,13 +4469,14 @@ def CheckStyle(filename, clean_lines, linenum, file_extension, nesting_state,
           'Line ends in whitespace.  Consider deleting these extra spaces.')
   # There are certain situations we allow one space, notably for
   # section labels, and also lines containing multi-line raw strings.
-  elif ((initial_spaces == 1 or initial_spaces == 3) and
+  # SRombauts: switched to 4 spaces indent
+  elif ((initial_spaces in (1,2,3,5,6,7)) and
         not Match(scope_or_label_pattern, cleansed_line) and
         not (clean_lines.raw_lines[linenum] != line and
              Match(r'^\s*""', line))):
     error(filename, linenum, 'whitespace/indent', 3,
           'Weird number of spaces at line-start.  '
-          'Are you using a 2-space indent?')
+          'Are you using a 4-space indent?') # SRombauts: 2 -> 4 spaces
 
   # Check if the line is a header guard.
   is_header_guard = False
@@ -4815,10 +4864,11 @@ def CheckLanguage(filename, clean_lines, linenum, file_extension,
       error(filename, linenum, 'runtime/int', 4,
             'Use "unsigned short" for ports, not "short"')
   else:
+    # SRombauts: switched to standard types from <cstdin> (int8 -> int8_t)
     match = Search(r'\b(short|long(?! +double)|long long)\b', line)
     if match:
       error(filename, linenum, 'runtime/int', 4,
-            'Use int16/int64/etc, rather than the C type %s' % match.group(1))
+            'Use int8_t/int16_t/int32_t/int64_t/etc, rather than the C type %s' % match.group(1))
 
   # Check if some verboten operator overloading is going on
   # TODO(unknown): catch out-of-line unary operator&:
@@ -5230,9 +5280,10 @@ def CheckCasts(filename, clean_lines, linenum, error):
   # I just try to capture the most common basic types, though there are more.
   # Parameterless conversion functions, such as bool(), are allowed as they are
   # probably a member operator declaration or default constructor.
+  # SRombauts: switched to standard types from <cstdin> (int8 -> int8_t)
   match = Search(
       r'(\bnew\s+|\S<\s*(?:const\s+)?)?\b'
-      r'(int|float|double|bool|char|int32|uint32|int64|uint64)'
+      r'(int|float|double|bool|char|int8_t|uint8_t|int16_t|uint16_t|int32_t|uint32_t|int64_t|uint64_t)'
       r'(\([^)].*)', line)
   expecting_function = ExpectingFunctionArgs(clean_lines, linenum)
   if match and not expecting_function:
@@ -6170,8 +6221,9 @@ def ProcessFile(filename, vlevel, extra_check_functions=[]):
         lf_lines.append(linenum + 1)
 
   except IOError:
-    sys.stderr.write(
-        "Skipping input '%s': Can't open for reading\n" % filename)
+    # SRombauts: do not complain for directory in the file list
+    #sys.stderr.write(
+    #    "Skipping input '%s': Can't open for reading\n" % filename)
     _RestoreFilters()
     return
 
@@ -6181,8 +6233,10 @@ def ProcessFile(filename, vlevel, extra_check_functions=[]):
   # When reading from stdin, the extension is unknown, so no cpplint tests
   # should rely on the extension.
   if filename != '-' and file_extension not in _valid_extensions:
-    sys.stderr.write('Ignoring %s; not a valid file name '
-                     '(%s)\n' % (filename, ', '.join(_valid_extensions)))
+    # SRombauts: do not complain for non C++ files
+    #sys.stderr.write('Ignoring %s; not a valid file name '
+    #                 '(%s)\n' % (filename, ', '.join(_valid_extensions)))
+    None
   else:
     ProcessFileData(filename, file_extension, lines, Error,
                     extra_check_functions)
@@ -6202,10 +6256,12 @@ def ProcessFile(filename, vlevel, extra_check_functions=[]):
       # check whether the file is mostly CRLF or just LF, and warn on the
       # minority, we bias toward LF here since most tools prefer LF.
       for linenum in crlf_lines:
-        Error(filename, linenum, 'whitespace/newline', 1,
+        # SRombauts: Windows endline in a Unix file is a high level error, not a warning
+        Error(filename, linenum, 'whitespace/newline', 5,
               'Unexpected \\r (^M) found; better to use only \\n')
 
-  sys.stderr.write('Done processing %s\n' % filename)
+  # SRombauts: do not show progress
+  #sys.stderr.write('Done processing %s\n' % filename)
   _RestoreFilters()
 
 
