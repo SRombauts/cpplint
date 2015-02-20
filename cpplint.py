@@ -2113,6 +2113,12 @@ class _ClassInfo(_BlockInfo):
       self.access = 'private'
       self.is_struct = False
 
+    # SRombauts : forward declaration or C-like "struct type"
+    if clean_lines.raw_lines[linenum].find(";") != -1:
+      self.declaration = True
+    else:      
+      self.declaration = False
+
     # Remember initial indentation level for this class.  Using raw_lines here
     # instead of elided to account for leading comments.
     self.class_indent = GetIndentLevel(clean_lines.raw_lines[linenum])
@@ -2135,6 +2141,23 @@ class _ClassInfo(_BlockInfo):
     # Look for a bare ':'
     if Search('(^|[^:]):($|[^:])', clean_lines.elided[linenum]):
       self.is_derived = True
+
+    # SRombauts: check camel-case class naming
+    if self.is_struct:
+      parent = 'struct ' + self.name
+    else:
+      parent = 'class ' + self.name
+   
+    if not self.declaration:
+      if len(self.name) == 1:
+        error(filename, linenum, 'readability/type_name', 4,
+              "%s has only one character")
+      elif self.name[0].islower():
+        error(filename, linenum, 'readability/type_name', 4,
+              "%s is not in camel-case (first letter '%s' is not in uppercase)." % (parent, self.name[0]))
+      elif (self.name[0] == 'C' or self.name[0] == 'T') and self.name[1].isupper():
+        error(filename, linenum, 'readability/type_name', 3,
+              "%s should not be prefixed by '%s'." % (parent, self.name[0]))
 
   def CheckEnd(self, filename, clean_lines, linenum, error):
     # If there is a DISALLOW macro, it should appear near the end of
@@ -3203,7 +3226,8 @@ def CheckOperatorSpacing(filename, clean_lines, linenum, error):
        Search(r'=[\w.]', line))
       and not Search(r'\b(if|while|for) ', line)
       # Operators taken from [lex.operators] in C++11 standard.
-      and not Search(r'(>=|<=|==|!=|&=|\^=|\|=|\+=|\*=|\/=|\%=)', line)
+      # SRombauts: added -=
+      and not Search(r'(>=|<=|==|!=|&=|\^=|\|=|\+=|\-=|\*=|\/=|\%=)', line)
       and not Search(r'operator=', line)):
     error(filename, linenum, 'whitespace/operators', 4,
           'Missing spaces around =')
@@ -3223,10 +3247,11 @@ def CheckOperatorSpacing(filename, clean_lines, linenum, error):
   #
   # Note that && is not included here.  Those are checked separately
   # in CheckRValueReference
-  match = Search(r'[^<>=!\s](==|!=|<=|>=|\|\|)[^<>=!\s,;\)]', line)
-  if match:
+  # SRombauts: modified to also warn even when there is already one space in one side
+  match = Search(r'([^<>=!\s])?(==|!=|<=|>=|\-=|\+=|\|\|)([^<>=!\s,;\)])?', line)
+  if match and (match.group(1) != None or match.group(3) != None):
     error(filename, linenum, 'whitespace/operators', 3,
-          'Missing spaces around %s' % match.group(1))
+          'Missing spaces around %s' % match.group(2))
   elif not Match(r'#.*include', line):
     # Look for < that is not surrounded by spaces.  This is only
     # triggered if both sides are missing spaces, even though
@@ -3335,6 +3360,11 @@ def CheckCommaSpacing(filename, clean_lines, linenum, error):
   """
   raw = clean_lines.lines_without_raw_strings
   line = clean_lines.elided[linenum]
+
+  # SRombauts: you shouldn't have spaces before a comma
+  if Search(r'\w\s+\,', line):
+    error(filename, linenum, 'whitespace/comma', 3,
+          'Extra space before ,')
 
   # You should always have a space after a comma (either as fn arg or operator)
   #
@@ -6373,7 +6403,8 @@ def main():
     ProcessFile(filename, _cpplint_state.verbose_level)
   _cpplint_state.PrintErrorCounts()
 
-  sys.exit(_cpplint_state.error_count > 0)
+  # SRombauts: do not break the build on cpplint warnings:
+  #sys.exit(_cpplint_state.error_count > 0)
 
 
 if __name__ == '__main__':
